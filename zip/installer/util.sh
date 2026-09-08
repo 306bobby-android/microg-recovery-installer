@@ -97,7 +97,7 @@ mount_system() {
   for _mp in /system_root /system /mnt/system; do
     [ -d "${_mp}" ] || continue
     if _sys_dir_of "${_mp}" >/dev/null 2>&1; then SYS_MOUNTPOINT="${_mp}"; break; fi
-    mount "${_mp}" >/dev/null 2>&1
+    mount -o rw "${_mp}" >/dev/null 2>&1 || mount "${_mp}" >/dev/null 2>&1
     if _sys_dir_of "${_mp}" >/dev/null 2>&1; then
       SYS_MOUNTPOINT="${_mp}"
       WE_MOUNTED_SYSTEM=1
@@ -144,19 +144,29 @@ mount_extra_partition() {
   return 1
 }
 
+# Remounts the filesystem holding a path read-write. The path is usually a
+# directory inside the mount (/system_root/system, /system/product), and
+# remounting a plain directory is a no-op, so resolve the mountpoint first.
 remount_rw() {
-  mount -o rw,remount "$1" >/dev/null 2>&1 ||
-    mount -o remount,rw "$1" >/dev/null 2>&1 || true
+  _rr_mp="$(mountpoint_of "$1")"
+  [ -n "${_rr_mp}" ] || _rr_mp="$1"
+  mount -o rw,remount "${_rr_mp}" >/dev/null 2>&1 ||
+    mount -o remount,rw "${_rr_mp}" >/dev/null 2>&1 ||
+    mount -o rw,remount "$1" >/dev/null 2>&1 || true
 }
 
+# The redirect runs in a subshell on purpose: ":" is a POSIX special builtin,
+# and a redirection error on one aborts the whole shell instead of returning.
 is_writable() {
-  : > "$1/.microg_rw_test" 2>/dev/null || return 1
+  ( : > "$1/.microg_rw_test" ) 2>/dev/null || return 1
   rm -f "$1/.microg_rw_test"
 }
 
 remount_system_rw() {
+  remount_rw "${SYS}"
   remount_rw "${SYS_MOUNTPOINT}"
   [ "${SYS_MOUNTPOINT}" = '/' ] || remount_rw /
+  is_writable "${SYS}"
 }
 
 unmount_system() {
@@ -169,12 +179,18 @@ unmount_system() {
   fi
 }
 
-# Prints "<filesystem> <free MiB>" for the filesystem holding a path. The field
-# walk copes with df wrapping long device names onto a second line.
+# Prints "<filesystem> <free MiB> <mountpoint>" for the fs holding a path. The
+# field walk copes with df wrapping long device names onto a second line.
 df_info() {
   df -k "$1" 2>/dev/null | awk '
     NR > 1 { for (i = 1; i <= NF; i++) f[++n] = $i }
-    END { if (n >= 5) printf "%s %d\n", f[1], int(f[n - 2] / 1024) }'
+    END { if (n >= 5) printf "%s %d %s\n", f[1], int(f[n - 2] / 1024), f[n] }'
+}
+
+mountpoint_of() {
+  # shellcheck disable=SC2046
+  set -- $(df_info "$1")
+  [ "$#" -ge 3 ] && printf '%s\n' "$3"
 }
 
 ### ------------------------------------------------------------ permissions ----

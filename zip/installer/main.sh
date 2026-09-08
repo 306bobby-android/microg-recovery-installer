@@ -84,26 +84,47 @@ _part_add() {
   printf '%s|%s|%s\n' "$1" "$2" "$3" >> "${WORK}/parts.list"
 }
 
+# Android only honours a privileged permission whitelist that sits on the same
+# partition as the app. A whitelist the ROM itself shipped there is proof the
+# platform reads them from that partition, which beats guessing from the API
+# level -- some Android 10 builds carry system_ext, some Android 11 ones do not
+# populate product. Below API 26 whitelists are not enforced at all.
+_reads_privapp_permissions() {
+  [ "${API}" -ge 26 ] || return 0
+  for _rp in "$1"/etc/permissions/privapp-permissions*.xml; do
+    [ -f "${_rp}" ] && return 0
+  done
+  return 1
+}
+
 _probe_extra_partition() {
+  _pep_path=''
+  _pep_dev=''
   if [ -d "${SYS}/$1" ] && [ ! -L "${SYS}/$1" ] && _looks_like_partition "${SYS}/$1"; then
-    _part_add "$1" "${SYS}/$1" "${ADDOND_S}/$1"
-    return
-  fi
-  if [ "${SYS_MOUNTPOINT}" != "${SYS}" ] && [ -d "${SYS_MOUNTPOINT}/$1" ] &&
+    _pep_path="${SYS}/$1"
+    _pep_dev="${ADDOND_S}/$1"
+  elif [ "${SYS_MOUNTPOINT}" != "${SYS}" ] && [ -d "${SYS_MOUNTPOINT}/$1" ] &&
     [ ! -L "${SYS_MOUNTPOINT}/$1" ] && _looks_like_partition "${SYS_MOUNTPOINT}/$1"; then
-    _part_add "$1" "${SYS_MOUNTPOINT}/$1" "/$1"
-    return
+    _pep_path="${SYS_MOUNTPOINT}/$1"
+    _pep_dev="/$1"
+  elif _pep_path="$(mount_extra_partition "$1")"; then
+    _pep_dev="/$1"
+  else
+    return 1
   fi
-  if _pep_mp="$(mount_extra_partition "$1")"; then
-    _part_add "$1" "${_pep_mp}" "/$1"
+
+  if ! _reads_privapp_permissions "${_pep_path}"; then
+    ui_print "  ! ${1} carries no privileged permission whitelist, skipping it"
+    return 1
   fi
+  _part_add "$1" "${_pep_path}" "${_pep_dev}"
 }
 
 probe_partitions() {
   : > "${WORK}/parts.list"
   _part_add 'system' "${SYS}" "${ADDOND_S}"
-  [ "${API}" -ge 29 ] && _probe_extra_partition 'product'
-  [ "${API}" -ge 30 ] && _probe_extra_partition 'system_ext'
+  _probe_extra_partition 'system_ext'
+  _probe_extra_partition 'product'
   [ -s "${WORK}/parts.list" ] ||
     abort 'Nothing writable to install to. Disable dm-verity / mount system read-write and retry.'
 }
@@ -384,18 +405,22 @@ mkdir -p "${WORK}" || abort 'Failed to create the work directory'
   abort 'apps.list is missing. This looks like the repo skeleton rather than a release zip.'
 
 mount_system
+if remount_system_rw; then
+  SYS_ACCESS='read-write'
+else
+  SYS_ACCESS='READ-ONLY'
+fi
 detect_device
 
 ui_print ' '
 ui_print "  Device      : ${DEVICE}"
 ui_print "  Android     : ${ANDROID_VER} (API ${API})"
 ui_print "  ABI         : ${ABI_LIST}"
-ui_print "  System path : ${SYS}"
+ui_print "  System path : ${SYS} (${SYS_ACCESS})"
 
 [ "${API}" -ge 19 ] ||
   abort "Android API ${API} is too old for current microG builds (API 19+ required)."
 
-remount_system_rw
 preseed_init
 probe_partitions
 keys_init

@@ -25,9 +25,15 @@ and packed by GitHub Actions, which publishes the finished zip as a release.
 Android loads privileged apps out of `/system`, `/system_ext` and `/product`
 alike, so the installer measures the free space on all three and installs to
 whichever has the most room — falling back from `/system` automatically on
-devices whose system partition is too full. `/product` is only considered on
-Android 10+ and `/system_ext` on Android 11+, since older releases do not read
-them.
+devices whose system partition is too full, or read-only.
+
+`/system_ext` and `/product` are used whenever the device actually has them,
+rather than being gated on an API level: some Android 10 builds ship
+`/system_ext`, some Android 11 ones leave `/product` empty. A partition is only
+accepted as a target if the ROM already ships a `privapp-permissions` file
+there, which is direct proof that the platform reads privileged permission
+whitelists from that partition. Getting that wrong bootloops the device, so
+guessing from the API level is not good enough.
 
 Everything for one install stays on the same partition. That is not just tidy:
 Android matches a privileged app against the `privapp-permissions` file **from

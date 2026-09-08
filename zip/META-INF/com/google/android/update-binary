@@ -51,7 +51,7 @@ INSTALLER_TMP=''
 for _cand in "${TMPDIR:-}" /tmp /dev/tmp /cache/tmp /data/local/tmp; do
   [ -n "${_cand}" ] || continue
   mkdir -p "${_cand}" 2>/dev/null || continue
-  if [ -w "${_cand}" ] && : > "${_cand}/.microg_write_test" 2>/dev/null; then
+  if [ -w "${_cand}" ] && ( : > "${_cand}/.microg_write_test" ) 2>/dev/null; then
     rm -f "${_cand}/.microg_write_test"
     INSTALLER_TMP="${_cand}"
     break
