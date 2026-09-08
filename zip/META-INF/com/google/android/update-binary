@@ -1,0 +1,79 @@
+#!/sbin/sh
+# microg-recovery-installer -- recovery entry point
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Recovery calls us as: update-binary <recovery-api> <out-fd> <zipfile>
+# All we do here is find a writable temp dir, unpack installer/ and hand over.
+
+umask 022
+set -u
+
+OUTFD="${2:-1}"
+ZIPFILE="${3:-}"
+export OUTFD ZIPFILE
+
+if [ -e "/proc/self/fd/${OUTFD}" ]; then
+  OUTFD_PATH="/proc/self/fd/${OUTFD}"
+else
+  OUTFD_PATH=''
+fi
+export OUTFD_PATH
+
+boot_print() {
+  if [ -n "${OUTFD_PATH}" ]; then
+    printf 'ui_print %s\nui_print\n' "$1" >> "${OUTFD_PATH}"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+boot_die() {
+  boot_print "! $1"
+  exit 1
+}
+
+# Some recoveries ship a crippled shell; make sure busybox applets win if present.
+if command -v busybox >/dev/null 2>&1; then
+  for _bb in unzip grep mkdir rm cp mv chmod chown find sed cut tr; do
+    command -v "${_bb}" >/dev/null 2>&1 || eval "${_bb}() { busybox ${_bb} \"\$@\"; }"
+  done
+  unset _bb
+fi
+
+command -v unzip >/dev/null 2>&1 || boot_die 'unzip is missing from this recovery'
+if [ -z "${ZIPFILE}" ] || [ ! -f "${ZIPFILE}" ]; then
+  boot_die 'Cannot find the zip being flashed'
+fi
+
+# Find somewhere writable. /tmp is the usual recovery ramdisk, /dev/tmp is the
+# fallback used when the recovery does not have one.
+INSTALLER_TMP=''
+for _cand in "${TMPDIR:-}" /tmp /dev/tmp /cache/tmp /data/local/tmp; do
+  [ -n "${_cand}" ] || continue
+  mkdir -p "${_cand}" 2>/dev/null || continue
+  if [ -w "${_cand}" ] && : > "${_cand}/.microg_write_test" 2>/dev/null; then
+    rm -f "${_cand}/.microg_write_test"
+    INSTALLER_TMP="${_cand}"
+    break
+  fi
+done
+unset _cand
+[ -n "${INSTALLER_TMP}" ] || boot_die 'No writable temp directory found'
+
+TMPDIR="${INSTALLER_TMP}"
+INSTALLER_DIR="${INSTALLER_TMP}/microg-installer"
+export TMPDIR INSTALLER_DIR
+
+rm -rf "${INSTALLER_DIR}"
+mkdir -p "${INSTALLER_DIR}" || boot_die 'Failed to create the working directory'
+
+unzip -o -q "${ZIPFILE}" 'installer/*' -d "${INSTALLER_DIR}" ||
+  boot_die 'Failed to unpack the installer from the zip'
+[ -f "${INSTALLER_DIR}/installer/main.sh" ] || boot_die 'This zip is incomplete (installer/main.sh missing)'
+
+INSTALL_STATUS=1
+# shellcheck source=/dev/null
+. "${INSTALLER_DIR}/installer/main.sh"
+
+rm -rf "${INSTALLER_DIR}"
+exit "${INSTALL_STATUS}"

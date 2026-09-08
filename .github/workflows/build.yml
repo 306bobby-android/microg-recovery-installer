@@ -1,0 +1,79 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so a new microG or Aurora Store release turns into a new zip.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Publish a GitHub release'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the shell scripts
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -s sh zip/META-INF/com/google/android/update-binary \
+                           zip/installer/util.sh zip/installer/main.sh
+          shellcheck -s bash scripts/build_zip.sh
+
+      - name: Download and verify the APKs
+        run: python3 scripts/fetch_apks.py
+
+      - name: Work out the version
+        id: meta
+        run: |
+          set -a; . build/versions.env; set +a
+          version="${GMS_VERSION}-$(date -u '+%Y%m%d')"
+          {
+            echo "version=${version}"
+            echo "tag=v${version}"
+            echo "gms=${GMS_VERSION}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo '### Bundled components'
+            echo
+            echo '| Component | Version |'
+            echo '| --- | --- |'
+            while IFS='|' read -r _ name _ _ pkg _ _ ver; do
+              [ -n "$name" ] && echo "| ${name} (\`${pkg}\`) | ${ver} |"
+            done < build/apps.list
+          } > build/notes.md
+
+      - name: Build the zip
+        run: scripts/build_zip.sh "${{ steps.meta.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: microg-recovery-installer-${{ steps.meta.outputs.version }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+      - name: Publish the release
+        if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; nothing new upstream."
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file build/notes.md \
+            dist/*.zip dist/*.sha256

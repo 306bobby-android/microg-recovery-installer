@@ -1,0 +1,8 @@
+/build/
+/dist/
+zip/apps/*.apk
+zip/installer/apps.list
+zip/installer/module.prop
+
+# reference zip this project was modelled on, not part of the repo
+microg-unofficial-installer-*.zip
