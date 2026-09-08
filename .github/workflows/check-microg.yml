@@ -1,0 +1,49 @@
+name: Check microG
+
+on:
+  schedule:
+    - cron: '30 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare upstream microG with the newest release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/fetch_apks.py --resolve-only
+          set -a; . build/versions.env; set +a
+
+          latest="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')"
+          released="${latest#v}"
+          released="${released%%-*}"
+
+          echo "upstream ${GMS_VERSION}, released ${released:-none}"
+          echo "version=${GMS_VERSION}" >> "$GITHUB_OUTPUT"
+          if [ "${GMS_VERSION}" = "${released}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Replace the changelog and start a release
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo 'Updated microG' > CHANGELOG.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add CHANGELOG.md
+          git commit -m "Updated microG to ${{ steps.check.outputs.version }}"
+          git push
+          gh workflow run build.yml --ref main

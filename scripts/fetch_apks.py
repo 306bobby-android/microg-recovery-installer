@@ -4,7 +4,11 @@
 Writes:
   build/apps/<DEST>.apk     the downloaded APKs
   build/apps.list           manifest consumed by the on-device installer
+  build/libsizes.list       per-ABI native library sizes
   build/versions.env        resolved versions, for the CI release step
+
+With --resolve-only nothing is downloaded and only versions.env is written,
+which is all the daily upstream check needs.
 
 Every download is checked against the signing certificate pinned in .env before
 it is accepted -- the privapp-permissions XMLs pin the same certificates, so a
@@ -221,15 +225,19 @@ def apk_package(apk: Path) -> str | None:
 
 # ------------------------------------------------------------------------- main
 def main() -> int:
+    resolve_only = "--resolve-only" in sys.argv[1:]
     env = load_env(ROOT / ".env")
     components = env.get("COMPONENTS", "").split()
     if not components:
         fail("COMPONENTS is empty in .env")
 
     apps_dir = BUILD / "apps"
-    apps_dir.mkdir(parents=True, exist_ok=True)
-    for stale in apps_dir.glob("*.apk"):
-        stale.unlink()
+    if resolve_only:
+        BUILD.mkdir(parents=True, exist_ok=True)
+    else:
+        apps_dir.mkdir(parents=True, exist_ok=True)
+        for stale in apps_dir.glob("*.apk"):
+            stale.unlink()
 
     manifest: list[str] = []
     versions: list[str] = []
@@ -263,6 +271,13 @@ def main() -> int:
             fail(f"{comp}: unknown resolver {resolver!r}")
 
         url, version = resolved if resolved else (pinned, "")
+        if resolve_only:
+            if not version:
+                version = re.sub(r"^.*?[-_]", "", url.rsplit("/", 1)[-1]).removesuffix(".apk")
+            log(f"    {version} -> {url}")
+            versions.append(f"{comp}_VERSION={shlex.quote(version)}")
+            versions.append(f"{comp}_RESOLVED_URL={shlex.quote(url)}")
+            continue
         if resolved:
             log(f"    resolved {version or 'latest'} -> {url}")
         else:
@@ -313,9 +328,13 @@ def main() -> int:
         versions.append(f"{comp}_VERSION={shlex.quote(version)}")
         versions.append(f"{comp}_RESOLVED_URL={shlex.quote(url)}")
 
+    (BUILD / "versions.env").write_text("\n".join(versions) + "\n")
+    if resolve_only:
+        log(f"\nWrote {BUILD / 'versions.env'} (nothing downloaded)")
+        return 0
+
     (BUILD / "apps.list").write_text("\n".join(manifest) + "\n")
     (BUILD / "libsizes.list").write_text("".join(f"{row}\n" for row in libsizes))
-    (BUILD / "versions.env").write_text("\n".join(versions) + "\n")
     log(f"\nWrote {BUILD / 'apps.list'} ({len(manifest)} components)")
     return 0
 

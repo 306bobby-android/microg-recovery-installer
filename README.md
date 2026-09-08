@@ -124,8 +124,9 @@ key, the build fails until someone verifies the new key and updates `.env`.
 ## Building locally
 
 ```sh
-python3 scripts/fetch_apks.py       # resolve, download, verify -> build/apps/
-scripts/build_zip.sh my-version     # assemble -> dist/
+python3 scripts/fetch_apks.py                 # resolve, download, verify -> build/apps/
+python3 scripts/fetch_apks.py --resolve-only  # just print what upstream has now
+scripts/build_zip.sh my-version               # assemble -> dist/
 ```
 
 Only `python3`, `openssl` and `zip` are needed. `aapt2` is used for an extra
@@ -133,10 +134,23 @@ package-name check when the Android SDK happens to be present.
 
 ## Releases
 
-CI derives the release tag from what actually ends up in the zip: the resolved
-component versions plus the hash of `zip/` and `.env`. A new microG, or a change
-to the installer, produces a new release; a README-only push or a weekly
-scheduled build with nothing new upstream does not.
+Releases are cut manually: run the **Build** workflow from the Actions tab. The
+first release of a given microG version is tagged with that version
+(`v0.3.16.252432`); later builds of the same microG become `v0.3.16.252432-HOTFIX1`,
+`-HOTFIX2` and so on.
+
+Every push still builds and verifies the zip, it just does not publish it, so a
+broken change is caught without producing a release.
+
+A second workflow, **Check microG**, runs daily. When upstream microG no longer
+matches the newest release it replaces `CHANGELOG.md` with `Updated microG`,
+commits it, and starts a release build.
+
+[`CHANGELOG.md`](CHANGELOG.md) holds the notes for the *next* release. They go
+into the release description under the component table and the flashing
+instructions, and the file is replaced for the release after that — earlier
+notes stay readable on the releases page. Edit it in the same commit as the
+change it describes.
 
 ## Layout
 
@@ -148,8 +162,10 @@ zip/                       the flashable skeleton (no APKs)
   installer/util.sh            mounting, volume keys, permissions
   installer/config/            the XMLs and the addon.d template
   apps/                        APKs land here at build time
+CHANGELOG.md               notes for the next release
 scripts/fetch_apks.py      resolve + download + verify
 scripts/build_zip.sh       assemble the zip
+scripts/next_tag.sh        version / HOTFIX tag for the next release
 ```
 
 ## Notes and caveats
