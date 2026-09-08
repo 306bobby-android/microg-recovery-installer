@@ -64,6 +64,8 @@ grep_prop() {
 
 ### ---------------------------------------------------------------- mounts ----
 
+PART_MOUNTS=''
+
 # Prints the directory that holds build.prop for a given mountpoint, or fails.
 _sys_dir_of() {
   if [ -f "$1/system/build.prop" ]; then printf '%s\n' "$1/system"; return 0; fi
@@ -71,12 +73,27 @@ _sys_dir_of() {
   return 1
 }
 
+_block_devices_for() {
+  _bd_slot="$(getprop ro.boot.slot_suffix 2>/dev/null)"
+  for _bd in \
+    "/dev/block/mapper/$1${_bd_slot}" \
+    "/dev/block/by-name/$1${_bd_slot}" \
+    "/dev/block/bootdevice/by-name/$1${_bd_slot}" \
+    /dev/block/platform/*/by-name/"$1${_bd_slot}" \
+    /dev/block/platform/*/*/by-name/"$1${_bd_slot}"; do
+    [ -e "${_bd}" ] && printf '%s\n' "${_bd}"
+  done
+}
+
+_looks_like_partition() {
+  [ -d "$1/priv-app" ] || [ -d "$1/app" ] || [ -d "$1/etc" ]
+}
+
 mount_system() {
   SYS_MOUNTPOINT=''
   SYS=''
   WE_MOUNTED_SYSTEM=0
 
-  # 1. Already mounted, or mountable by name (recovery fstab).
   for _mp in /system_root /system /mnt/system; do
     [ -d "${_mp}" ] || continue
     if _sys_dir_of "${_mp}" >/dev/null 2>&1; then SYS_MOUNTPOINT="${_mp}"; break; fi
@@ -88,17 +105,9 @@ mount_system() {
     fi
   done
 
-  # 2. Straight from the block device, for recoveries without a usable fstab.
   if [ -z "${SYS_MOUNTPOINT}" ]; then
-    _slot="$(getprop ro.boot.slot_suffix 2>/dev/null)"
     mkdir -p /mnt/microg_system 2>/dev/null
-    for _dev in \
-      "/dev/block/mapper/system${_slot}" \
-      "/dev/block/by-name/system${_slot}" \
-      "/dev/block/bootdevice/by-name/system${_slot}" \
-      /dev/block/platform/*/by-name/system"${_slot}" \
-      /dev/block/platform/*/*/by-name/system"${_slot}"; do
-      [ -e "${_dev}" ] || continue
+    for _dev in $(_block_devices_for system); do
       mount -o rw "${_dev}" /mnt/microg_system >/dev/null 2>&1 ||
         mount "${_dev}" /mnt/microg_system >/dev/null 2>&1 || continue
       if _sys_dir_of /mnt/microg_system >/dev/null 2>&1; then
@@ -113,29 +122,59 @@ mount_system() {
   [ -n "${SYS_MOUNTPOINT}" ] ||
     abort 'Could not find or mount the system partition. Mount /system in your recovery and retry.'
 
+  # shellcheck disable=SC2034  # used throughout main.sh
   SYS="$(_sys_dir_of "${SYS_MOUNTPOINT}")"
 }
 
-remount_system_rw() {
-  mount -o rw,remount "${SYS_MOUNTPOINT}" >/dev/null 2>&1 ||
-    mount -o remount,rw "${SYS_MOUNTPOINT}" >/dev/null 2>&1 ||
-    mount -o rw,remount / >/dev/null 2>&1 || true
+# Mounts a secondary partition (product, system_ext) and prints its mountpoint.
+mount_extra_partition() {
+  _me_mp="/mnt/microg_$1"
+  mkdir -p "${_me_mp}" 2>/dev/null || return 1
+  for _me_dev in $(_block_devices_for "$1"); do
+    mount -o rw "${_me_dev}" "${_me_mp}" >/dev/null 2>&1 ||
+      mount "${_me_dev}" "${_me_mp}" >/dev/null 2>&1 || continue
+    if _looks_like_partition "${_me_mp}"; then
+      PART_MOUNTS="${PART_MOUNTS} ${_me_mp}"
+      printf '%s\n' "${_me_mp}"
+      return 0
+    fi
+    umount "${_me_mp}" >/dev/null 2>&1
+  done
+  rmdir "${_me_mp}" 2>/dev/null
+  return 1
+}
 
-  if ! : > "${SYS}/.microg_rw_test" 2>/dev/null; then
-    abort "Cannot write to ${SYS}. Disable dm-verity / mount system read-write and retry."
-  fi
-  rm -f "${SYS}/.microg_rw_test"
+remount_rw() {
+  mount -o rw,remount "$1" >/dev/null 2>&1 ||
+    mount -o remount,rw "$1" >/dev/null 2>&1 || true
+}
+
+is_writable() {
+  : > "$1/.microg_rw_test" 2>/dev/null || return 1
+  rm -f "$1/.microg_rw_test"
+}
+
+remount_system_rw() {
+  remount_rw "${SYS_MOUNTPOINT}"
+  [ "${SYS_MOUNTPOINT}" = '/' ] || remount_rw /
 }
 
 unmount_system() {
+  for _um in ${PART_MOUNTS}; do
+    umount "${_um}" >/dev/null 2>&1 || true
+  done
+  PART_MOUNTS=''
   if [ "${WE_MOUNTED_SYSTEM:-0}" = 1 ] && [ -n "${SYS_MOUNTPOINT:-}" ]; then
     umount "${SYS_MOUNTPOINT}" >/dev/null 2>&1 || true
   fi
 }
 
-# Free space on the system partition, in MiB.
-system_free_mib() {
-  df -k "${SYS}" 2>/dev/null | awk 'NR>1 && NF>=4 { print int($(NF-2)/1024); exit }'
+# Prints "<filesystem> <free MiB>" for the filesystem holding a path. The field
+# walk copes with df wrapping long device names onto a second line.
+df_info() {
+  df -k "$1" 2>/dev/null | awk '
+    NR > 1 { for (i = 1; i <= NF; i++) f[++n] = $i }
+    END { if (n >= 5) printf "%s %d\n", f[1], int(f[n - 2] / 1024) }'
 }
 
 ### ------------------------------------------------------------ permissions ----

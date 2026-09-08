@@ -1,7 +1,7 @@
 # microg-recovery-installer
 
 A small, flashable recovery zip that installs **microG** and **Aurora Store**
-into `/system` — and nothing else.
+as system apps — and nothing else.
 
 This project installs six packages, at
 most, and asks before installing the two that are genuinely optional.
@@ -19,6 +19,23 @@ and packed by GitHub Actions, which publishes the finished zip as a release.
 | Aurora Store | `com.aurora.store` | `app` | no |
 | Aurora Services | `com.aurora.services` | `priv-app` | **yes** |
 | F-Droid Privileged Extension | `org.fdroid.fdroid.privileged` | `priv-app` | **yes** |
+
+## Where it installs
+
+Android loads privileged apps out of `/system`, `/system_ext` and `/product`
+alike, so the installer measures the free space on all three and installs to
+whichever has the most room — falling back from `/system` automatically on
+devices whose system partition is too full. `/product` is only considered on
+Android 10+ and `/system_ext` on Android 11+, since older releases do not read
+them.
+
+Everything for one install stays on the same partition. That is not just tidy:
+Android matches a privileged app against the `privapp-permissions` file **from
+its own partition**, so an app in `/product/priv-app` whitelisted only under
+`/system/etc/permissions` would be denied its permissions and bootloop the
+device. The only exception is `addon.d`, which lives in `/system/addon.d`
+because that is where the ROM looks for it; the generated script records which
+partition to restore to.
 
 Plus the configuration those packages need to actually work:
 
@@ -40,9 +57,11 @@ Plus the configuration those packages need to actually work:
 - Android **5.0+ recommended**, 4.4 (API 19) minimum — that is microG's floor.
 - A ROM with **signature spoofing support**, otherwise microG cannot pretend to
   be Google Play Services. This zip does not patch your framework.
-- Roughly **170 MiB free on `/system`**. Current microG builds are large
-  (a ~103 MiB universal APK, plus the native libraries extracted next to it).
-  The installer measures this and aborts early rather than half-installing.
+- Free space on **one of** `/system`, `/system_ext` or `/product`: about
+  **165 MiB** on arm64, **150 MiB** on arm32. Current microG builds are large —
+  a 103 MiB universal APK, plus the native libraries for your CPU unpacked next
+  to it. The installer measures this exactly and aborts rather than
+  half-installing.
 
 ## Flashing
 
@@ -68,6 +87,8 @@ explicitly, drop a `microg-installer.prop` next to the zip or on `/sdcard`:
 ACTION=1
 AURORA_SERVICES=0
 FDROID_PRIV=1
+# optional: force a partition instead of letting the installer pick
+PARTITION=product
 ```
 
 ## Where the APKs come from
@@ -127,15 +148,21 @@ scripts/build_zip.sh       assemble the zip
 
 ## Notes and caveats
 
-- **A/B and dynamic-partition devices** often cannot mount `/system` writable
-  from recovery at all. There is no Magisk module here; if `/system` is
-  read-only, this zip will tell you and stop.
-- Aurora Store is installed to `/system/app`, not `priv-app`, so it is not
-  itself a privileged installer. That is what Aurora Services is for.
+- **A/B and dynamic-partition devices** often cannot mount any of these
+  partitions writable from recovery at all. There is no Magisk module here; if
+  nothing is writable, this zip will tell you and stop.
+- Aurora Store is installed to `app`, not `priv-app`, so it is not itself a
+  privileged installer. That is what Aurora Services is for.
 - Aurora Services upstream has been dormant since 2021. It still works; it is
   optional for exactly that reason.
 - microG needs signature spoofing. If your ROM does not support it, microG will
   install and run but Google account login will not work.
+- Only your device's ABI is unpacked (40 MiB for arm64, 27 MiB for arm32), not
+  all four. The APK itself still carries every ABI and cannot be slimmed: it
+  uses APK Signature Scheme v2 with `X-Android-APK-Signed` stripping
+  protection, so removing the unused `lib/` entries invalidates the signature
+  and the certificate digest the permission XMLs pin. Trimming it would mean
+  re-signing microG with our own key, which this project will not do.
 
 ## Credits
 

@@ -8,6 +8,7 @@
 
 CONFIG_DIR="${INSTALLER_DIR}/installer/config"
 APPS_LIST="${INSTALLER_DIR}/installer/apps.list"
+LIB_SIZES="${INSTALLER_DIR}/installer/libsizes.list"
 RECEIPT_DIR='etc/microg-installer'
 RECEIPT="${RECEIPT_DIR}/files.list"
 ADDOND_NAME='50-microg.sh'
@@ -16,13 +17,20 @@ WORK="${INSTALLER_DIR}/work"
 MODULE_NAME='microG recovery installer'
 MODULE_VERSION="$(grep_prop version "${INSTALLER_DIR}/installer/module.prop" 2>/dev/null || echo 'dev')"
 
+# Filled in once the partitions have been probed.
+TARGET_NAME=''
+TARGET_ROOT=''
+TARGET_DEVPATH=''
+OLD_ROOT=''
+OLD_NAME=''
+
 ### ------------------------------------------------------------- receipts ----
 
 record() { printf '%s\n' "$1" >> "${WORK}/files.list"; }
 
 read_receipt() {
-  [ -f "${SYS}/${RECEIPT}" ] || return 1
-  cat "${SYS}/${RECEIPT}"
+  [ -n "${OLD_ROOT}" ] && [ -f "${OLD_ROOT}/${RECEIPT}" ] || return 1
+  cat "${OLD_ROOT}/${RECEIPT}"
 }
 
 ### --------------------------------------------------------------- device ----
@@ -57,9 +65,147 @@ abi_to_isa() {
   esac
 }
 
+### ----------------------------------------------------------- partitions ----
+# Android reads priv-app/app and etc/permissions out of /system, /system_ext and
+# /product alike, so any of them is a valid install target. parts.list holds one
+# "name|path|device path" row per usable candidate, in preference order. The
+# device path is where the partition lives on a booted system and is written
+# into the addon.d script verbatim, where backuptool expands $S for us.
+
+# shellcheck disable=SC2016
+ADDOND_S='${S}'
+
+_part_add() {
+  remount_rw "$2"
+  if ! is_writable "$2"; then
+    ui_print "  ! ${1} is not writable, skipping"
+    return 1
+  fi
+  printf '%s|%s|%s\n' "$1" "$2" "$3" >> "${WORK}/parts.list"
+}
+
+_probe_extra_partition() {
+  if [ -d "${SYS}/$1" ] && [ ! -L "${SYS}/$1" ] && _looks_like_partition "${SYS}/$1"; then
+    _part_add "$1" "${SYS}/$1" "${ADDOND_S}/$1"
+    return
+  fi
+  if [ "${SYS_MOUNTPOINT}" != "${SYS}" ] && [ -d "${SYS_MOUNTPOINT}/$1" ] &&
+    [ ! -L "${SYS_MOUNTPOINT}/$1" ] && _looks_like_partition "${SYS_MOUNTPOINT}/$1"; then
+    _part_add "$1" "${SYS_MOUNTPOINT}/$1" "/$1"
+    return
+  fi
+  if _pep_mp="$(mount_extra_partition "$1")"; then
+    _part_add "$1" "${_pep_mp}" "/$1"
+  fi
+}
+
+probe_partitions() {
+  : > "${WORK}/parts.list"
+  _part_add 'system' "${SYS}" "${ADDOND_S}"
+  [ "${API}" -ge 29 ] && _probe_extra_partition 'product'
+  [ "${API}" -ge 30 ] && _probe_extra_partition 'system_ext'
+  [ -s "${WORK}/parts.list" ] ||
+    abort 'Nothing writable to install to. Disable dm-verity / mount system read-write and retry.'
+}
+
+find_existing_install() {
+  while IFS='|' read -r _fe_name _fe_path _; do
+    if [ -f "${_fe_path}/${RECEIPT}" ]; then
+      OLD_NAME="${_fe_name}"
+      OLD_ROOT="${_fe_path}"
+      return 0
+    fi
+  done < "${WORK}/parts.list"
+  return 1
+}
+
+# Picks the partition with the most free space that fits, printing the sizes as
+# it goes. Candidates sharing a filesystem with an earlier one are not choices.
+choose_target() {
+  _ct_best_free=-1
+  _ct_seen=''
+
+  ui_print ' '
+  ui_print "  Space needed: ~${NEEDED_MIB} MiB"
+  while IFS='|' read -r _ct_name _ct_path _ct_dev; do
+    # shellcheck disable=SC2046  # df_info prints two fields to split on
+    set -- $(df_info "${_ct_path}")
+    if [ "$#" -lt 2 ]; then
+      ui_print "    ${_ct_name}: size unknown"
+      continue
+    fi
+    _ct_fsid="$1"
+    _ct_free="$2"
+
+    case " ${_ct_seen} " in
+      *" ${_ct_fsid} "*)
+        ui_print "    ${_ct_name}: ${_ct_free} MiB free (same filesystem as an earlier one)"
+        continue
+        ;;
+    esac
+    _ct_seen="${_ct_seen} ${_ct_fsid}"
+    ui_print "    ${_ct_name}: ${_ct_free} MiB free"
+
+    [ "${_ct_free}" -ge "${NEEDED_MIB}" ] || continue
+    if [ "${_ct_free}" -gt "${_ct_best_free}" ]; then
+      _ct_best_free="${_ct_free}"
+      TARGET_NAME="${_ct_name}"
+      TARGET_ROOT="${_ct_path}"
+      TARGET_DEVPATH="${_ct_dev}"
+    fi
+  done < "${WORK}/parts.list"
+
+  _ct_forced="$(preseed_get PARTITION)"
+  if [ -n "${_ct_forced}" ]; then
+    TARGET_NAME=''
+    TARGET_ROOT=''
+    while IFS='|' read -r _ct_name _ct_path _ct_dev; do
+      [ "${_ct_name}" = "${_ct_forced}" ] || continue
+      # shellcheck disable=SC2046
+      set -- $(df_info "${_ct_path}")
+      if [ "$#" -ge 2 ] && [ "$2" -lt "${NEEDED_MIB}" ]; then
+        abort "The preseed file asks for ${_ct_forced}, which has only $2 MiB free."
+      fi
+      TARGET_NAME="${_ct_name}"
+      TARGET_ROOT="${_ct_path}"
+      TARGET_DEVPATH="${_ct_dev}"
+      ui_print "  Partition forced to ${TARGET_NAME} by the preseed file"
+    done < "${WORK}/parts.list"
+    [ -n "${TARGET_ROOT}" ] ||
+      abort "The preseed file asks for partition ${_ct_forced}, which is not usable here."
+  fi
+
+  [ -n "${TARGET_ROOT}" ] ||
+    abort "No partition has ~${NEEDED_MIB} MiB free. Free some space and retry."
+  ui_print "  Installing to: ${TARGET_NAME} (${TARGET_ROOT})"
+}
+
 ### -------------------------------------------------------------- install ----
 
-# apk_abi <apk> -- first ABI from the device list that the APK actually ships
+# select_abi <dest> -- first device ABI the apk ships libraries for, from the
+# table CI built. Only that one is installed; the others stay unpacked.
+select_abi() {
+  [ -f "${LIB_SIZES}" ] || return 1
+  _sa_ifs="${IFS}"
+  IFS=','
+  for _sa_abi in ${ABI_LIST}; do
+    IFS="${_sa_ifs}"
+    [ -n "${_sa_abi}" ] || continue
+    if grep -q "^$1|${_sa_abi}|" "${LIB_SIZES}" 2>/dev/null; then
+      printf '%s\n' "${_sa_abi}"
+      return 0
+    fi
+    IFS=','
+  done
+  IFS="${_sa_ifs}"
+  return 1
+}
+
+lib_bytes() {
+  grep -m1 "^$1|$2|" "${LIB_SIZES}" 2>/dev/null | cut -d'|' -f3
+}
+
+# apk_abi <apk> -- same choice made by reading the apk, when libsizes is absent
 apk_abi() {
   _aa_have="$(unzip -l "$1" 'lib/*' 2>/dev/null | awk '{ print $NF }' | grep '^lib/' | cut -d/ -f2 | sort -u)"
   [ -n "${_aa_have}" ] || return 1
@@ -78,17 +224,17 @@ apk_abi() {
   return 1
 }
 
-# extract_libs <apk on device> <apk directory>
+# extract_libs <apk on device> <apk directory> <dest>
 extract_libs() {
   _el_apk="$1"
   _el_dir="$2"
 
-  if ! _el_abi="$(apk_abi "${_el_apk}")"; then
+  if ! _el_abi="$(select_abi "$3")" && ! _el_abi="$(apk_abi "${_el_apk}")"; then
     ui_print '     no native libraries for this CPU, skipping'
     return 0
   fi
   _el_isa="$(abi_to_isa "${_el_abi}")"
-  ui_print "     native libraries: ${_el_abi}"
+  ui_print "     native libraries: ${_el_abi} only"
 
   if [ "${API}" -ge 21 ]; then
     # Cluster install: Android looks for <apk dir>/lib/<isa>/*.so
@@ -108,20 +254,20 @@ extract_libs() {
   else
     # Pre-Lollipop bundled apps load their libraries from /system/lib[64].
     case "${_el_abi}" in
-      *64*) _el_libdir="${SYS}/lib64" ;;
-      *) _el_libdir="${SYS}/lib" ;;
+      *64*) _el_libdir="${TARGET_ROOT}/lib64" ;;
+      *) _el_libdir="${TARGET_ROOT}/lib" ;;
     esac
-    rm -rf "${SYS:?}/.microg_libs"
-    unzip -o -q "${_el_apk}" "lib/${_el_abi}/*" -d "${SYS}/.microg_libs" ||
+    rm -rf "${TARGET_ROOT:?}/.microg_libs"
+    unzip -o -q "${_el_apk}" "lib/${_el_abi}/*" -d "${TARGET_ROOT}/.microg_libs" ||
       abort "Failed to extract native libraries from ${_el_apk}"
     mkdir -p "${_el_libdir}"
-    for _el_so in "${SYS}/.microg_libs/lib/${_el_abi}"/*; do
+    for _el_so in "${TARGET_ROOT}/.microg_libs/lib/${_el_abi}"/*; do
       [ -f "${_el_so}" ] || continue
       cp -f "${_el_so}" "${_el_libdir}/" || abort 'Failed to install a native library'
       set_perm 0 0 0644 "${_el_libdir}/$(basename "${_el_so}")"
-      record "${_el_libdir#"${SYS}"/}/$(basename "${_el_so}")"
+      record "${_el_libdir#"${TARGET_ROOT}"/}/$(basename "${_el_so}")"
     done
-    rm -rf "${SYS:?}/.microg_libs"
+    rm -rf "${TARGET_ROOT:?}/.microg_libs"
   fi
 }
 
@@ -136,10 +282,10 @@ install_app() {
   [ "${API}" -ge 19 ] || _ia_target='app'
 
   if [ "${API}" -ge 21 ]; then
-    _ia_dir="${SYS}/${_ia_target}/${_ia_dest}"
+    _ia_dir="${TARGET_ROOT}/${_ia_target}/${_ia_dest}"
     _ia_rel="${_ia_target}/${_ia_dest}"
   else
-    _ia_dir="${SYS}/${_ia_target}"
+    _ia_dir="${TARGET_ROOT}/${_ia_target}"
     _ia_rel="${_ia_target}/${_ia_dest}.apk"
   fi
 
@@ -154,7 +300,7 @@ install_app() {
   record "${_ia_rel}"
 
   if [ "${_ia_libs}" = 1 ]; then
-    extract_libs "${_ia_dir}/${_ia_dest}.apk" "${_ia_dir}"
+    extract_libs "${_ia_dir}/${_ia_dest}.apk" "${_ia_dir}" "${_ia_dest}"
   fi
 }
 
@@ -162,9 +308,9 @@ install_app() {
 install_config() {
   [ "${API}" -ge "$4" ] || return 0
   [ -f "${CONFIG_DIR}/$1/$3" ] || return 0
-  mkdir -p "${SYS}/$2" || abort "Failed to create ${SYS}/$2"
-  cp -f "${CONFIG_DIR}/$1/$3" "${SYS}/$2/$3" || abort "Failed to install $3"
-  set_perm_file "${SYS}/$2/$3"
+  mkdir -p "${TARGET_ROOT}/$2" || abort "Failed to create ${TARGET_ROOT}/$2"
+  cp -f "${CONFIG_DIR}/$1/$3" "${TARGET_ROOT}/$2/$3" || abort "Failed to install $3"
+  set_perm_file "${TARGET_ROOT}/$2/$3"
   record "$2/$3"
 }
 
@@ -172,23 +318,25 @@ install_config() {
 
 install_addond() {
   [ -d "${SYS}/addon.d" ] || return 0
+  is_writable "${SYS}/addon.d" || return 0
 
   # backuptool only knows how to copy individual files, so expand the
   # directories we recorded into the files they actually contain.
   : > "${WORK}/addond.list"
   while IFS= read -r _ad_path; do
     [ -n "${_ad_path}" ] || continue
-    if [ -d "${SYS}/${_ad_path}" ]; then
-      find "${SYS}/${_ad_path}" -type f 2>/dev/null | sed "s|^${SYS}/||" >> "${WORK}/addond.list"
+    if [ -d "${TARGET_ROOT}/${_ad_path}" ]; then
+      find "${TARGET_ROOT}/${_ad_path}" -type f 2>/dev/null |
+        sed "s|^${TARGET_ROOT}/||" >> "${WORK}/addond.list"
     else
-      # Plain file, or the addon.d script itself, which is written right after
-      # this list is built and has to restore itself too.
       printf '%s\n' "${_ad_path}" >> "${WORK}/addond.list"
     fi
   done < "${WORK}/files.list"
 
   {
     cat "${CONFIG_DIR}/addon.d-head.sh"
+    printf 'MICROG_ROOT="%s"\n\n' "${TARGET_DEVPATH}"
+    printf 'list_files() {\ncat <<%s\n' "'MICROG_ADDOND_LIST'"
     cat "${WORK}/addond.list"
     cat "${CONFIG_DIR}/addon.d-tail.sh"
   } > "${SYS}/addon.d/${ADDOND_NAME}" || abort 'Failed to install the addon.d survival script'
@@ -209,9 +357,10 @@ do_uninstall() {
     case "${_du_path}" in
       /*|*..*) continue ;;
     esac
-    rm -rf "${SYS:?}/${_du_path:?}" 2>/dev/null || true
+    rm -rf "${OLD_ROOT:?}/${_du_path:?}" 2>/dev/null || true
   done < "${WORK}/old.list"
-  rm -rf "${SYS:?}/${RECEIPT_DIR:?}" 2>/dev/null || true
+  rm -rf "${OLD_ROOT:?}/${RECEIPT_DIR:?}" 2>/dev/null || true
+  rm -f "${SYS}/addon.d/${ADDOND_NAME}" 2>/dev/null || true
   [ "${_du_quiet}" = 1 ] || ui_print '  Removed the previous installation.'
 }
 
@@ -248,6 +397,7 @@ ui_print "  System path : ${SYS}"
 
 remount_system_rw
 preseed_init
+probe_partitions
 keys_init
 
 if [ "${KEYS_USABLE}" != 1 ]; then
@@ -257,12 +407,9 @@ fi
 
 ### --- what to do -------------------------------------------------------------
 
-ALREADY_INSTALLED=0
-[ -f "${SYS}/${RECEIPT}" ] && ALREADY_INSTALLED=1
-
-if [ "${ALREADY_INSTALLED}" = 1 ]; then
+if find_existing_install; then
   ui_print ' '
-  ui_print '  A previous installation was found.'
+  ui_print "  A previous installation was found on ${OLD_NAME}."
   if ASK_KEY='ACTION' ask 'What do you want to do?' 'Reinstall / update' 'Uninstall' 0; then
     : # reinstall
   else
@@ -304,7 +451,7 @@ ui_print ' '
 ui_print '  Cleaning up any previous installation...'
 do_uninstall 1
 
-### --- space check ------------------------------------------------------------
+### --- sizing ----------------------------------------------------------------
 
 NEEDED_KB=0
 want=0  # set per component by the eval below
@@ -317,23 +464,19 @@ while IFS='|' read -r KEY NAME TARGET DEST PACKAGE OPTIONAL LIBS VERSION; do
   case "${size}" in
     ''|*[!0-9]*) size=0 ;;
   esac
-  # native libraries are extracted on top of the apk, so allow ~40% extra
-  [ "${LIBS}" = 1 ] && size=$((size + size * 40 / 100))
+  # the apk keeps every ABI; only the one we unpack alongside it adds to this
+  if [ "${LIBS}" = 1 ]; then
+    if abi="$(select_abi "${DEST}")"; then
+      size=$((size + $(lib_bytes "${DEST}" "${abi}")))
+    else
+      size=$((size + size * 40 / 100))
+    fi
+  fi
   NEEDED_KB=$((NEEDED_KB + size / 1024))
 done < "${APPS_LIST}"
 
 NEEDED_MIB=$((NEEDED_KB / 1024 + 8))
-FREE_MIB="$(system_free_mib)"
-ui_print ' '
-ui_print "  Space needed: ~${NEEDED_MIB} MiB   available: ${FREE_MIB:-?} MiB"
-case "${FREE_MIB}" in
-  ''|*[!0-9]*) ;;
-  *)
-    if [ "${FREE_MIB}" -lt "${NEEDED_MIB}" ]; then
-      abort "Not enough free space on ${SYS} (need ~${NEEDED_MIB} MiB, have ${FREE_MIB} MiB)."
-    fi
-    ;;
-esac
+choose_target
 
 ### --- install ----------------------------------------------------------------
 
@@ -363,16 +506,16 @@ install_config sysconfig etc/sysconfig microg.xml 21
 
 ### --- receipt + addon.d ------------------------------------------------------
 
-mkdir -p "${SYS}/${RECEIPT_DIR}" || abort 'Failed to create the receipt directory'
+mkdir -p "${TARGET_ROOT}/${RECEIPT_DIR}" || abort 'Failed to create the receipt directory'
 record "${RECEIPT_DIR}"
-[ -d "${SYS}/addon.d" ] && record "addon.d/${ADDOND_NAME}"
 
-cp -f "${WORK}/files.list" "${SYS}/${RECEIPT}" || abort 'Failed to write the receipt'
-set_perm_file "${SYS}/${RECEIPT}"
-printf 'version=%s\ninstalled=%s\n' "${MODULE_VERSION}" "$(date 2>/dev/null || echo unknown)" \
-  > "${SYS}/${RECEIPT_DIR}/info.prop" 2>/dev/null || true
-set_perm_file "${SYS}/${RECEIPT_DIR}/info.prop"
-set_perm_dir "${SYS}/${RECEIPT_DIR}"
+cp -f "${WORK}/files.list" "${TARGET_ROOT}/${RECEIPT}" || abort 'Failed to write the receipt'
+set_perm_file "${TARGET_ROOT}/${RECEIPT}"
+printf 'version=%s\npartition=%s\ninstalled=%s\n' \
+  "${MODULE_VERSION}" "${TARGET_NAME}" "$(date 2>/dev/null || echo unknown)" \
+  > "${TARGET_ROOT}/${RECEIPT_DIR}/info.prop" 2>/dev/null || true
+set_perm_file "${TARGET_ROOT}/${RECEIPT_DIR}/info.prop"
+set_perm_dir "${TARGET_ROOT}/${RECEIPT_DIR}"
 
 install_addond
 
@@ -380,7 +523,7 @@ install_addond
 
 ui_print ' '
 ui_rule
-ui_print '  Installed:'
+ui_print "  Installed to ${TARGET_NAME}:"
 printf '%s' "${INSTALLED_SUMMARY}" | while IFS= read -r line; do
   [ -n "${line}" ] && ui_print "${line}"
 done

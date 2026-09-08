@@ -21,6 +21,7 @@ cp -a "${ROOT}/zip/." "${STAGE}/"
 rm -f "${STAGE}/apps/.gitkeep"
 
 cp "${BUILD}/apps.list" "${STAGE}/installer/apps.list"
+cp "${BUILD}/libsizes.list" "${STAGE}/installer/libsizes.list"
 cp "${BUILD}"/apps/*.apk "${STAGE}/apps/"
 
 cat > "${STAGE}/installer/module.prop" <<PROP

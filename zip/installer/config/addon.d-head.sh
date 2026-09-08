@@ -10,5 +10,3 @@
   return 1 2>/dev/null || exit 1
 }
 
-list_files() {
-cat <<'MICROG_ADDOND_LIST'

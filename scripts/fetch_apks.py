@@ -189,6 +189,17 @@ def cert_sha256(apk: Path) -> str:
     return hashlib.sha256(cert).hexdigest().upper()
 
 
+def lib_sizes(apk: Path) -> dict[str, int]:
+    """Uncompressed size of the native libraries in each ABI the APK ships."""
+    totals: dict[str, int] = {}
+    with zipfile.ZipFile(apk) as zf:
+        for info in zf.infolist():
+            parts = info.filename.split("/")
+            if len(parts) >= 3 and parts[0] == "lib" and parts[-1].endswith(".so"):
+                totals[parts[1]] = totals.get(parts[1], 0) + info.file_size
+    return totals
+
+
 def apk_package(apk: Path) -> str | None:
     """Package name via aapt2, when the Android SDK happens to be around."""
     aapt2 = None
@@ -222,6 +233,7 @@ def main() -> int:
 
     manifest: list[str] = []
     versions: list[str] = []
+    libsizes: list[str] = []
 
     for comp in components:
         name = get(env, comp, "NAME")
@@ -290,6 +302,11 @@ def main() -> int:
         size = apk.stat().st_size
         log(f"    {apk.name}  {size / 1048576:.1f} MiB  version {version}")
 
+        if extract_libs == "1":
+            for abi, total in sorted(lib_sizes(apk).items()):
+                libsizes.append(f"{dest}|{abi}|{total}")
+                log(f"      libs {abi}: {total / 1048576:.1f} MiB unpacked")
+
         manifest.append(
             "|".join([comp, name, target, dest, package, optional, extract_libs, version])
         )
@@ -297,6 +314,7 @@ def main() -> int:
         versions.append(f"{comp}_RESOLVED_URL={shlex.quote(url)}")
 
     (BUILD / "apps.list").write_text("\n".join(manifest) + "\n")
+    (BUILD / "libsizes.list").write_text("".join(f"{row}\n" for row in libsizes))
     (BUILD / "versions.env").write_text("\n".join(versions) + "\n")
     log(f"\nWrote {BUILD / 'apps.list'} ({len(manifest)} components)")
     return 0
