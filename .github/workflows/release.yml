@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and show the tag and notes without publishing'
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Mark the release as a prerelease'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: apks
+        uses: ./.github/actions/fetch-apks
+
+      - name: Work out the tag
+        id: meta
+        run: |
+          tag="$(scripts/next_tag.sh "${{ steps.apks.outputs.gms }}")"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the zip
+        run: scripts/build_zip.sh "${{ steps.meta.outputs.version }}"
+
+      - name: Write the release notes
+        run: |
+          {
+            echo '| Component | Package | Version |'
+            echo '| --- | --- | --- |'
+            while IFS='|' read -r _ name _ _ pkg _ _ ver; do
+              [ -n "$name" ] && echo "| ${name} | \`${pkg}\` | ${ver} |"
+            done < build/apps.list
+            echo
+            echo 'Flash in a custom recovery. Volume Up = yes, Volume Down = no.'
+            echo 'It installs to whichever of `/system`, `/system_ext` or `/product`'
+            echo 'has the most free space.'
+            if [ -s CHANGELOG.md ]; then
+              echo
+              echo '## Changes'
+              echo
+              sed '/^<!--/,/-->$/d' CHANGELOG.md | sed '/./,$!d'
+            fi
+          } > build/notes.md
+
+      - name: Summary
+        run: |
+          {
+            echo "## ${{ steps.meta.outputs.tag }}"
+            [ '${{ inputs.dry_run }}' = 'true' ] && echo '_Dry run: nothing was published._'
+            echo
+            cat build/notes.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: microg-recovery-installer-${{ steps.meta.outputs.version }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+      - name: Publish
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists." >&2
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file build/notes.md \
+            ${{ inputs.prerelease && '--prerelease' || '' }} \
+            dist/*.zip dist/*.sha256

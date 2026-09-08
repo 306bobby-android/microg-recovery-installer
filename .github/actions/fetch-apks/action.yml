@@ -1,0 +1,29 @@
+name: Fetch APKs
+description: Lint the installer scripts, then resolve, download and verify the APKs.
+
+outputs:
+  gms:
+    description: Resolved microG Services version.
+    value: ${{ steps.versions.outputs.gms }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the shell scripts
+      shell: bash
+      run: |
+        sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+        shellcheck -s sh zip/META-INF/com/google/android/update-binary \
+                         zip/installer/util.sh zip/installer/main.sh
+        shellcheck -s bash scripts/build_zip.sh scripts/next_tag.sh
+
+    - name: Download and verify the APKs
+      shell: bash
+      run: python3 scripts/fetch_apks.py
+
+    - name: Read the resolved versions
+      id: versions
+      shell: bash
+      run: |
+        set -a; . build/versions.env; set +a
+        echo "gms=${GMS_VERSION}" >> "$GITHUB_OUTPUT"

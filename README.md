@@ -134,17 +134,23 @@ package-name check when the Android SDK happens to be present.
 
 ## Releases
 
-Releases are cut manually: run the **Build** workflow from the Actions tab. The
-first release of a given microG version is tagged with that version
-(`v0.3.16.252432`); later builds of the same microG become `v0.3.16.252432-HOTFIX1`,
-`-HOTFIX2` and so on.
+Three workflows:
 
-Every push still builds and verifies the zip, it just does not publish it, so a
-broken change is caught without producing a release.
+| Workflow | Runs on | Does |
+| --- | --- | --- |
+| **Build** | every push and PR | builds and verifies the zip, publishes nothing |
+| **Release** | manual only | builds it and publishes a release |
+| **Check microG** | daily | starts a Release when upstream microG has moved |
 
-A second workflow, **Check microG**, runs daily. When upstream microG no longer
-matches the newest release it replaces `CHANGELOG.md` with `Updated microG`,
-commits it, and starts a release build.
+Releases are cut by running **Release** from the Actions tab. The first release
+of a given microG version is tagged with that version (`v0.3.16.252432`); later
+builds of the same microG become `v0.3.16.252432-HOTFIX1`, `-HOTFIX2` and so on.
+It takes two options: **dry run**, which builds everything and shows you the tag
+and the notes in the run summary without publishing, and **prerelease**.
+
+**Check microG** resolves upstream microG without downloading it. When it no
+longer matches the newest release it replaces `CHANGELOG.md` with
+`Updated microG`, commits it, and starts a Release.
 
 [`CHANGELOG.md`](CHANGELOG.md) holds the notes for the *next* release. They go
 into the release description under the component table and the flashing

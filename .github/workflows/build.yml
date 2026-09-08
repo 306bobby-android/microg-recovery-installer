@@ -1,13 +1,13 @@
 name: Build
 
+# Verification only. Releases come from the Release workflow.
 on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -15,32 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check the shell scripts
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck -s sh zip/META-INF/com/google/android/update-binary \
-                           zip/installer/util.sh zip/installer/main.sh
-          shellcheck -s bash scripts/build_zip.sh scripts/next_tag.sh
-
-      - name: Download and verify the APKs
-        run: python3 scripts/fetch_apks.py
+      - id: apks
+        uses: ./.github/actions/fetch-apks
 
       - name: Work out the version
         id: meta
-        run: |
-          set -a; . build/versions.env; set +a
-          if [ "${{ github.event_name }}" = 'workflow_dispatch' ]; then
-            tag="$(scripts/next_tag.sh "${GMS_VERSION}")"
-            version="${tag#v}"
-          else
-            tag=''
-            version="${GMS_VERSION}+${GITHUB_SHA:0:7}"
-          fi
-          {
-            echo "tag=${tag}"
-            echo "version=${version}"
-            echo "gms=${GMS_VERSION}"
-          } >> "$GITHUB_OUTPUT"
+        run: echo "version=${{ steps.apks.outputs.gms }}+${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Build the zip
         run: scripts/build_zip.sh "${{ steps.meta.outputs.version }}"
@@ -51,40 +31,3 @@ jobs:
           path: |
             dist/*.zip
             dist/*.sha256
-
-      - name: Write the release notes
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          {
-            echo '| Component | Package | Version |'
-            echo '| --- | --- | --- |'
-            while IFS='|' read -r _ name _ _ pkg _ _ ver; do
-              [ -n "$name" ] && echo "| ${name} | \`${pkg}\` | ${ver} |"
-            done < build/apps.list
-            echo
-            echo 'Flash in a custom recovery. Volume Up = yes, Volume Down = no.'
-            echo 'It installs to whichever of `/system`, `/system_ext` or `/product`'
-            echo 'has the most free space.'
-            if [ -s CHANGELOG.md ]; then
-              echo
-              echo '## Changes'
-              echo
-              sed '/^<!--/,/-->$/d' CHANGELOG.md | sed '/./,$!d'
-            fi
-          } > build/notes.md
-          cat build/notes.md
-
-      - name: Publish the release
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.meta.outputs.tag }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists." >&2
-            exit 1
-          fi
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --notes-file build/notes.md \
-            dist/*.zip dist/*.sha256

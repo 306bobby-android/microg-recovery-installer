@@ -46,4 +46,4 @@ jobs:
           git add CHANGELOG.md
           git commit -m "Updated microG to ${{ steps.check.outputs.version }}"
           git push
-          gh workflow run build.yml --ref main
+          gh workflow run release.yml --ref main
