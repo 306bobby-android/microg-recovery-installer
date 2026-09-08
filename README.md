@@ -40,9 +40,9 @@ Plus the configuration those packages need to actually work:
 - Android **5.0+ recommended**, 4.4 (API 19) minimum — that is microG's floor.
 - A ROM with **signature spoofing support**, otherwise microG cannot pretend to
   be Google Play Services. This zip does not patch your framework.
-- Roughly **150 MiB free on `/system`**. Current microG builds are large
-  (~108 MiB universal APK plus extracted native libraries). The installer
-  checks and aborts early rather than half-installing.
+- Roughly **170 MiB free on `/system`**. Current microG builds are large
+  (a ~103 MiB universal APK, plus the native libraries extracted next to it).
+  The installer measures this and aborts early rather than half-installing.
 
 ## Flashing
 
@@ -97,12 +97,19 @@ key, the build fails until someone verifies the new key and updates `.env`.
 ## Building locally
 
 ```sh
-python3 scripts/fetch_apks.py     # resolve, download, verify -> build/apps/
-scripts/build_zip.sh 2026.09.08   # assemble -> dist/
+python3 scripts/fetch_apks.py       # resolve, download, verify -> build/apps/
+scripts/build_zip.sh my-version     # assemble -> dist/
 ```
 
 Only `python3`, `openssl` and `zip` are needed. `aapt2` is used for an extra
 package-name check when the Android SDK happens to be present.
+
+## Releases
+
+CI derives the release tag from what actually ends up in the zip: the resolved
+component versions plus the hash of `zip/` and `.env`. A new microG, or a change
+to the installer, produces a new release; a README-only push or a weekly
+scheduled build with nothing new upstream does not.
 
 ## Layout
 
