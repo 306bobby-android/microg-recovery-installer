@@ -75,6 +75,12 @@ abi_to_isa() {
 # shellcheck disable=SC2016
 ADDOND_S='${S}'
 
+# Every root we found, whether or not it is a valid target. A previous install
+# has to be findable even on a partition we would no longer install to.
+_root_add() {
+  printf '%s|%s\n' "$1" "$2" >> "${WORK}/roots.list"
+}
+
 _part_add() {
   remount_rw "$2"
   if ! is_writable "$2"; then
@@ -112,6 +118,7 @@ _probe_extra_partition() {
   else
     return 1
   fi
+  _root_add "$1" "${_pep_path}"
 
   if ! _reads_privapp_permissions "${_pep_path}"; then
     ui_print "  ! ${1} carries no privileged permission whitelist, skipping it"
@@ -122,6 +129,8 @@ _probe_extra_partition() {
 
 probe_partitions() {
   : > "${WORK}/parts.list"
+  : > "${WORK}/roots.list"
+  _root_add 'system' "${SYS}"
   _part_add 'system' "${SYS}" "${ADDOND_S}"
   _probe_extra_partition 'system_ext'
   _probe_extra_partition 'product'
@@ -130,13 +139,13 @@ probe_partitions() {
 }
 
 find_existing_install() {
-  while IFS='|' read -r _fe_name _fe_path _; do
+  while IFS='|' read -r _fe_name _fe_path; do
     if [ -f "${_fe_path}/${RECEIPT}" ]; then
       OLD_NAME="${_fe_name}"
       OLD_ROOT="${_fe_path}"
       return 0
     fi
-  done < "${WORK}/parts.list"
+  done < "${WORK}/roots.list"
   return 1
 }
 
@@ -372,6 +381,10 @@ do_uninstall() {
   if ! read_receipt > "${WORK}/old.list" 2>/dev/null; then
     [ "${_du_quiet}" = 1 ] || ui_print '  Nothing recorded as installed.'
     return 0
+  fi
+  if ! is_writable "${OLD_ROOT}"; then
+    ui_print "  ! ${OLD_NAME} is read-only, the old files cannot be removed"
+    return 1
   fi
   while IFS= read -r _du_path; do
     [ -n "${_du_path}" ] || continue
