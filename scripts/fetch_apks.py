@@ -293,8 +293,8 @@ def main() -> int:
         manifest.append(
             "|".join([comp, name, target, dest, package, optional, extract_libs, version])
         )
-        versions.append(f"{comp}_VERSION={version}")
-        versions.append(f"{comp}_RESOLVED_URL={url}")
+        versions.append(f"{comp}_VERSION={shlex.quote(version)}")
+        versions.append(f"{comp}_RESOLVED_URL={shlex.quote(url)}")
 
     (BUILD / "apps.list").write_text("\n".join(manifest) + "\n")
     (BUILD / "versions.env").write_text("\n".join(versions) + "\n")

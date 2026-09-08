@@ -37,20 +37,31 @@ jobs:
         id: meta
         run: |
           set -a; . build/versions.env; set +a
-          version="${GMS_VERSION}-$(date -u '+%Y%m%d')"
+          # The tag is derived from what actually goes into the zip: the upstream
+          # component versions plus the installer skeleton. A README-only push
+          # therefore does not cut a release, but a new microG (or a change to
+          # the installer) does.
+          stamp="$(
+            { cut -d'|' -f8 build/apps.list
+              git rev-parse 'HEAD:zip'
+              git hash-object .env
+            } | sha256sum | cut -c1-7
+          )"
+          version="${GMS_VERSION}-${stamp}"
           {
             echo "version=${version}"
             echo "tag=v${version}"
-            echo "gms=${GMS_VERSION}"
           } >> "$GITHUB_OUTPUT"
           {
-            echo '### Bundled components'
+            echo "microG **${GMS_VERSION}**, built $(date -u '+%Y-%m-%d')."
             echo
-            echo '| Component | Version |'
-            echo '| --- | --- |'
+            echo '| Component | Package | Version |'
+            echo '| --- | --- | --- |'
             while IFS='|' read -r _ name _ _ pkg _ _ ver; do
-              [ -n "$name" ] && echo "| ${name} (\`${pkg}\`) | ${ver} |"
+              [ -n "$name" ] && echo "| ${name} | \`${pkg}\` | ${ver} |"
             done < build/apps.list
+            echo
+            echo 'Flash in a custom recovery. Volume Up = yes, Volume Down = no.'
           } > build/notes.md
 
       - name: Build the zip
