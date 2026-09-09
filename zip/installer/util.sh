@@ -80,7 +80,10 @@ _block_devices_for() {
     "/dev/block/by-name/$1${_bd_slot}" \
     "/dev/block/bootdevice/by-name/$1${_bd_slot}" \
     /dev/block/platform/*/by-name/"$1${_bd_slot}" \
-    /dev/block/platform/*/*/by-name/"$1${_bd_slot}"; do
+    /dev/block/platform/*/*/by-name/"$1${_bd_slot}" \
+    "/dev/block/mapper/$1" \
+    "/dev/block/by-name/$1" \
+    "/dev/block/bootdevice/by-name/$1"; do
     [ -e "${_bd}" ] && printf '%s\n' "${_bd}"
   done
 }
@@ -126,8 +129,12 @@ mount_system() {
   SYS="$(_sys_dir_of "${SYS_MOUNTPOINT}")"
 }
 
-# Mounts a secondary partition (product, system_ext) and prints its mountpoint.
+# Mounts a secondary partition (product, system_ext) and sets EXTRA_MP.
+# It sets a variable instead of printing one because callers used to run it in a
+# command substitution, which lost the PART_MOUNTS bookkeeping in the subshell.
+EXTRA_MP=''
 mount_extra_partition() {
+  EXTRA_MP=''
   _me_mp="/mnt/microg_$1"
   mkdir -p "${_me_mp}" 2>/dev/null || return 1
   for _me_dev in $(_block_devices_for "$1"); do
@@ -135,13 +142,26 @@ mount_extra_partition() {
       mount "${_me_dev}" "${_me_mp}" >/dev/null 2>&1 || continue
     if _looks_like_partition "${_me_mp}"; then
       PART_MOUNTS="${PART_MOUNTS} ${_me_mp}"
-      printf '%s\n' "${_me_mp}"
+      # shellcheck disable=SC2034  # read by main.sh
+      EXTRA_MP="${_me_mp}"
       return 0
     fi
     umount "${_me_mp}" >/dev/null 2>&1
   done
   rmdir "${_me_mp}" 2>/dev/null
   return 1
+}
+
+# Every mountpoint whose last path component is $1, straight from the kernel.
+# Recoveries mount system_ext and product wherever they like, so asking is more
+# reliable than guessing at a list of paths.
+mounted_paths_named() {
+  [ -r /proc/mounts ] || return 0
+  while read -r _mp_dev _mp_path _mp_junk; do
+    case "${_mp_path}" in
+      */"$1") printf '%s\n' "${_mp_path}" ;;
+    esac
+  done < /proc/mounts
 }
 
 # Remounts the filesystem holding a path read-write. The path is usually a

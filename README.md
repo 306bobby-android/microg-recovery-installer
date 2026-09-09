@@ -27,13 +27,18 @@ alike, so the installer measures the free space on all three and installs to
 whichever has the most room — falling back from `/system` automatically on
 devices whose system partition is too full, or read-only.
 
-`/system_ext` and `/product` are used whenever the device actually has them,
-rather than being gated on an API level: some Android 10 builds ship
-`/system_ext`, some Android 11 ones leave `/product` empty. A partition is only
-accepted as a target if the ROM already ships a `privapp-permissions` file
-there, which is direct proof that the platform reads privileged permission
-whitelists from that partition. Getting that wrong bootloops the device, so
-guessing from the API level is not good enough.
+`/system_ext` and `/product` are found by asking the kernel: whatever the
+recovery already has mounted under those names wins, and only if nothing is
+mounted does the installer look through the usual layouts (`/system_ext`,
+`/mnt/system_ext`, a directory inside the system root) and finally mount the
+partition itself from its block device. Recoveries put them in different places,
+so a fixed list of paths misses them on real devices.
+
+A partition is accepted as a target only if Android reads privileged permission
+whitelists from it: `/product` from API 29, `/system_ext` from API 30, or on an
+older release if the ROM already ships a `privapp-permissions` file there.
+Getting that wrong bootloops the device. The installer prints where it found
+each partition, and why it skipped one, before it picks a target.
 
 Everything for one install stays on the same partition. That is not just tidy:
 Android matches a privileged app against the `privapp-permissions` file **from

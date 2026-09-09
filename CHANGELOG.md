@@ -10,3 +10,10 @@ for the release after that. Past notes stay readable on the releases page.
   longer depends on what the recovery provides.
 - Measure the install from sizes recorded at build time instead of reading the
   zip on the device.
+- Find `/system_ext` and `/product` from the kernel's mount table instead of a
+  fixed list of paths, so they are no longer missed on devices where the
+  recovery mounts them somewhere else.
+- Accept `/product` from API 29 and `/system_ext` from API 30 even when the ROM
+  ships no permission whitelist of its own there.
+- Print every partition, where it was found, and the reason any of them was
+  skipped.

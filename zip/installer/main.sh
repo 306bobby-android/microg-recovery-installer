@@ -84,52 +84,91 @@ _root_add() {
 _part_add() {
   remount_rw "$2"
   if ! is_writable "$2"; then
-    ui_print "  ! ${1} is not writable, skipping"
+    ui_print '      skipped, read-only'
     return 1
   fi
   printf '%s|%s|%s\n' "$1" "$2" "$3" >> "${WORK}/parts.list"
 }
 
 # Android only honours a privileged permission whitelist that sits on the same
-# partition as the app. A whitelist the ROM itself shipped there is proof the
-# platform reads them from that partition, which beats guessing from the API
-# level -- some Android 10 builds carry system_ext, some Android 11 ones do not
-# populate product. Below API 26 whitelists are not enforced at all.
+# partition as the app, and it only scans a partition's etc/permissions from the
+# release that introduced the partition: product from API 29, system_ext from
+# API 30. An older ROM that already ships a whitelist there proves it anyway.
+# Below API 26 nothing is enforced.
+_privapp_since() {
+  case "$1" in
+    system_ext) printf '30\n' ;;
+    product) printf '29\n' ;;
+    *) printf '0\n' ;;
+  esac
+}
+
 _reads_privapp_permissions() {
   [ "${API}" -ge 26 ] || return 0
-  for _rp in "$1"/etc/permissions/privapp-permissions*.xml; do
+  [ "${API}" -ge "$(_privapp_since "$1")" ] && return 0
+  for _rp in "$2"/etc/permissions/privapp-permissions*.xml; do
     [ -f "${_rp}" ] && return 0
   done
   return 1
 }
 
-_probe_extra_partition() {
-  _pep_path=''
-  _pep_dev=''
-  if [ -d "${SYS}/$1" ] && [ ! -L "${SYS}/$1" ] && _looks_like_partition "${SYS}/$1"; then
-    _pep_path="${SYS}/$1"
-    _pep_dev="${ADDOND_S}/$1"
-  elif [ "${SYS_MOUNTPOINT}" != "${SYS}" ] && [ -d "${SYS_MOUNTPOINT}/$1" ] &&
-    [ ! -L "${SYS_MOUNTPOINT}/$1" ] && _looks_like_partition "${SYS_MOUNTPOINT}/$1"; then
-    _pep_path="${SYS_MOUNTPOINT}/$1"
-    _pep_dev="/$1"
-  elif _pep_path="$(mount_extra_partition "$1")"; then
-    _pep_dev="/$1"
-  else
-    return 1
-  fi
-  _root_add "$1" "${_pep_path}"
+# Where a secondary partition may show up, best first. Whatever the kernel
+# already has mounted wins; the rest are the layouts recoveries use.
+_extra_candidates() {
+  mounted_paths_named "$1"
+  printf '%s\n' "${SYS}/$1"
+  [ "${SYS_MOUNTPOINT}" = "${SYS}" ] || printf '%s\n' "${SYS_MOUNTPOINT}/$1"
+  printf '%s\n' "/$1" "/mnt/$1" "/mnt/system/$1" "/system_root/$1" "/system/$1"
+}
 
-  if ! _reads_privapp_permissions "${_pep_path}"; then
-    ui_print "  ! ${1} carries no privileged permission whitelist, skipping it"
+_probe_extra_partition() {
+  _pep_name="$1"
+  _pep_path=''
+  _pep_seen=''
+
+  _extra_candidates "${_pep_name}" > "${WORK}/candidates.list"
+  while IFS= read -r _pep_c; do
+    [ -n "${_pep_c}" ] || continue
+    case " ${_pep_seen} " in
+      *" ${_pep_c} "*) continue ;;
+    esac
+    _pep_seen="${_pep_seen} ${_pep_c}"
+    [ -L "${_pep_c}" ] && continue
+    [ -d "${_pep_c}" ] || continue
+    _looks_like_partition "${_pep_c}" || continue
+    _pep_path="${_pep_c}"
+    break
+  done < "${WORK}/candidates.list"
+
+  if [ -z "${_pep_path}" ] && mount_extra_partition "${_pep_name}"; then
+    _pep_path="${EXTRA_MP}"
+  fi
+
+  if [ -z "${_pep_path}" ]; then
+    ui_print "    ${_pep_name}: not present on this device"
     return 1
   fi
-  _part_add "$1" "${_pep_path}" "${_pep_dev}"
+
+  case "${_pep_path}" in
+    "${SYS}/${_pep_name}") _pep_dev="${ADDOND_S}/${_pep_name}" ;;
+    *) _pep_dev="/${_pep_name}" ;;
+  esac
+
+  _root_add "${_pep_name}" "${_pep_path}"
+  ui_print "    ${_pep_name}: ${_pep_path}"
+  if ! _reads_privapp_permissions "${_pep_name}" "${_pep_path}"; then
+    ui_print '      skipped, this Android version ignores permissions there'
+    return 1
+  fi
+  _part_add "${_pep_name}" "${_pep_path}" "${_pep_dev}"
 }
 
 probe_partitions() {
   : > "${WORK}/parts.list"
   : > "${WORK}/roots.list"
+  ui_print ' '
+  ui_print '  Partitions:'
+  ui_print "    system: ${SYS}"
   _root_add 'system' "${SYS}"
   _part_add 'system' "${SYS}" "${ADDOND_S}"
   _probe_extra_partition 'system_ext'
