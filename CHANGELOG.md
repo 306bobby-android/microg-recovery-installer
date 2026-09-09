@@ -10,10 +10,15 @@ for the release after that. Past notes stay readable on the releases page.
   longer depends on what the recovery provides.
 - Measure the install from sizes recorded at build time instead of reading the
   zip on the device.
-- Find `/system_ext` and `/product` from the kernel's mount table instead of a
-  fixed list of paths, so they are no longer missed on devices where the
-  recovery mounts them somewhere else.
+- Find `/system_ext` and `/product` on devices with dynamic partitions, where
+  they are separate partitions that the recovery has not mounted and that show
+  up as symlinks inside `/system`. Only `/system` was offered before.
+- Clear the read-only flag on logical block devices with `blockdev --setrw`
+  before mounting or remounting them. Without it no mount option can make a
+  dynamic partition writable.
+- Resolve block devices through the recovery's own fstab, with the A/B slot
+  suffix taken from the kernel command line when the property is missing.
 - Accept `/product` from API 29 and `/system_ext` from API 30 even when the ROM
   ships no permission whitelist of its own there.
-- Print every partition, where it was found, and the reason any of them was
-  skipped.
+- Print the partition layout, where each partition was found, and the reason
+  any of them was skipped.

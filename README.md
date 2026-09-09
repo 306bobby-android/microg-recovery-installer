@@ -27,12 +27,16 @@ alike, so the installer measures the free space on all three and installs to
 whichever has the most room — falling back from `/system` automatically on
 devices whose system partition is too full, or read-only.
 
-`/system_ext` and `/product` are found by asking the kernel: whatever the
-recovery already has mounted under those names wins, and only if nothing is
-mounted does the installer look through the usual layouts (`/system_ext`,
-`/mnt/system_ext`, a directory inside the system root) and finally mount the
-partition itself from its block device. Recoveries put them in different places,
-so a fixed list of paths misses them on real devices.
+`/system_ext` and `/product` come in three shapes and the installer handles all
+three. They may be plain directories inside `/system`, they may already be
+mounted by the recovery, or -- on any device with dynamic partitions -- they may
+be partitions of their own that appear as symlinks inside `/system` and that the
+recovery never mounts. In the last case the installer resolves the block device
+through the recovery's fstab (falling back to `/dev/block/mapper` and the by-name
+directories, with the A/B slot suffix from `ro.boot.slot_suffix` or the kernel
+command line), clears the block-level read-only flag with `blockdev --setrw`, and
+mounts the partition itself. That flag is the reason a plain `mount -o remount,rw`
+silently does nothing on a logical partition.
 
 A partition is accepted as a target only if Android reads privileged permission
 whitelists from it: `/product` from API 29, `/system_ext` from API 30, or on an

@@ -112,36 +112,39 @@ _reads_privapp_permissions() {
   return 1
 }
 
-# Where a secondary partition may show up, best first. Whatever the kernel
-# already has mounted wins; the rest are the layouts recoveries use.
-_extra_candidates() {
-  mounted_paths_named "$1"
-  printf '%s\n' "${SYS}/$1"
-  [ "${SYS_MOUNTPOINT}" = "${SYS}" ] || printf '%s\n' "${SYS_MOUNTPOINT}/$1"
-  printf '%s\n' "/$1" "/mnt/$1" "/mnt/system/$1" "/system_root/$1" "/system/$1"
-}
-
+# Finds a secondary partition. Three shapes exist and all three are common:
+# the partition is a real directory inside system, the recovery already mounted
+# it somewhere, or it is a partition of its own that nothing has mounted yet.
+# A symlink at <system>/<name> means the third case, which is what dynamic
+# partition devices look like in recovery.
 _probe_extra_partition() {
   _pep_name="$1"
   _pep_path=''
-  _pep_seen=''
+  _pep_dev=''
+  _pep_note=''
 
-  _extra_candidates "${_pep_name}" > "${WORK}/candidates.list"
-  while IFS= read -r _pep_c; do
-    [ -n "${_pep_c}" ] || continue
-    case " ${_pep_seen} " in
-      *" ${_pep_c} "*) continue ;;
-    esac
-    _pep_seen="${_pep_seen} ${_pep_c}"
-    [ -L "${_pep_c}" ] && continue
-    [ -d "${_pep_c}" ] || continue
-    _looks_like_partition "${_pep_c}" || continue
-    _pep_path="${_pep_c}"
-    break
-  done < "${WORK}/candidates.list"
+  if [ -d "${SYS}/${_pep_name}" ] && [ ! -L "${SYS}/${_pep_name}" ] &&
+    _looks_like_partition "${SYS}/${_pep_name}"; then
+    _pep_path="${SYS}/${_pep_name}"
+    _pep_dev="${ADDOND_S}/${_pep_name}"
+  fi
+
+  if [ -z "${_pep_path}" ]; then
+    mounted_paths_named "${_pep_name}" > "${WORK}/candidates.list"
+    while IFS= read -r _pep_c; do
+      [ -n "${_pep_c}" ] || continue
+      [ -d "${_pep_c}" ] || continue
+      _looks_like_partition "${_pep_c}" || continue
+      _pep_path="${_pep_c}"
+      _pep_dev="/${_pep_name}"
+      break
+    done < "${WORK}/candidates.list"
+  fi
 
   if [ -z "${_pep_path}" ] && mount_extra_partition "${_pep_name}"; then
     _pep_path="${EXTRA_MP}"
+    _pep_dev="/${_pep_name}"
+    _pep_note=" (mounted from ${MOUNTED_BLOCK})"
   fi
 
   if [ -z "${_pep_path}" ]; then
@@ -149,13 +152,8 @@ _probe_extra_partition() {
     return 1
   fi
 
-  case "${_pep_path}" in
-    "${SYS}/${_pep_name}") _pep_dev="${ADDOND_S}/${_pep_name}" ;;
-    *) _pep_dev="/${_pep_name}" ;;
-  esac
-
   _root_add "${_pep_name}" "${_pep_path}"
-  ui_print "    ${_pep_name}: ${_pep_path}"
+  ui_print "    ${_pep_name}: ${_pep_path}${_pep_note}"
   if ! _reads_privapp_permissions "${_pep_name}" "${_pep_path}"; then
     ui_print '      skipped, this Android version ignores permissions there'
     return 1
@@ -476,6 +474,11 @@ ui_print "  Device      : ${DEVICE}"
 ui_print "  Android     : ${ANDROID_VER} (API ${API})"
 ui_print "  ABI         : ${ABI_LIST}"
 ui_print "  System path : ${SYS} (${SYS_ACCESS})"
+if [ "${DYNAMIC_PARTITIONS}" = 'true' ]; then
+  ui_print "  Layout      : dynamic partitions${SLOT_SUFFIX:+, slot ${SLOT_SUFFIX}}"
+else
+  ui_print "  Layout      : static partitions${SLOT_SUFFIX:+, slot ${SLOT_SUFFIX}}"
+fi
 
 [ "${API}" -ge 19 ] ||
   abort "Android API ${API} is too old for current microG builds (API 19+ required)."
