@@ -179,12 +179,32 @@ unmount_system() {
   fi
 }
 
-# Prints "<filesystem> <free MiB> <mountpoint>" for the fs holding a path. The
-# field walk copes with df wrapping long device names onto a second line.
+# Prints "<filesystem> <free MiB> <mountpoint>" for the fs holding a path.
+# Collapsing every field after the header copes with df wrapping a long device
+# name onto its own line. Deliberately free of awk: this has to keep working
+# even if the bundled busybox could not be started.
 df_info() {
-  df -k "$1" 2>/dev/null | awk '
-    NR > 1 { for (i = 1; i <= NF; i++) f[++n] = $i }
-    END { if (n >= 5) printf "%s %d %s\n", f[1], int(f[n - 2] / 1024), f[n] }'
+  _di_row=''
+  _di_skip=1
+  while IFS= read -r _di_line; do
+    if [ "${_di_skip}" = 1 ]; then
+      _di_skip=0
+      continue
+    fi
+    _di_row="${_di_row} ${_di_line}"
+  done <<DF_EOF
+$(df -k "$1" 2>/dev/null)
+DF_EOF
+
+  # shellcheck disable=SC2086
+  set -- ${_di_row}
+  [ "$#" -ge 5 ] || return 1
+  _di_fs="$1"
+  while [ "$#" -gt 3 ]; do shift; done
+  case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  printf '%s %s %s\n' "${_di_fs}" "$(($1 / 1024))" "$3"
 }
 
 mountpoint_of() {

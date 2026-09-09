@@ -3,8 +3,9 @@
 
 Writes:
   build/apps/<DEST>.apk     the downloaded APKs
+  build/busybox/busybox-*   static busybox, one per instruction set
   build/apps.list           manifest consumed by the on-device installer
-  build/libsizes.list       per-ABI native library sizes
+  build/sizes.list          apk and per-ABI native library sizes
   build/versions.env        resolved versions, for the CI release step
 
 With --resolve-only nothing is downloaded and only versions.env is written,
@@ -224,6 +225,68 @@ def apk_package(apk: Path) -> str | None:
 
 
 # ------------------------------------------------------------------------- main
+# uname -m style names, which is what update-binary picks between.
+BUSYBOX_ABIS = {
+    "arm64-v8a": "arm64",
+    "armeabi-v7a": "arm",
+    "x86_64": "x86_64",
+    "x86": "x86",
+}
+
+
+def fetch_busybox(env: dict[str, str]) -> str:
+    """Pull the static busybox binaries out of the Magisk APK."""
+    name = get(env, "BUSYBOX", "NAME", "BusyBox")
+    expected_cert = get(env, "BUSYBOX", "CERT_SHA256").upper().replace(":", "")
+    pinned = get(env, "BUSYBOX", "URL")
+
+    log(f"==> {name}")
+    resolved = resolve_github(
+        get(env, "BUSYBOX", "GITHUB_REPO"), get(env, "BUSYBOX", "ASSET_REGEX")
+    )
+    url, version = resolved if resolved else (pinned, "")
+    log(f"    {version or 'pinned'} -> {url}")
+
+    apk = BUILD / "magisk.apk"
+    try:
+        download(url, apk)
+    except Exception as exc:  # noqa: BLE001
+        if url == pinned:
+            fail(f"busybox: download failed: {exc}")
+        log(f"    download failed ({exc}); falling back to the pinned URL")
+        url, version = pinned, ""
+        download(url, apk)
+
+    actual_cert = cert_sha256(apk)
+    if actual_cert != expected_cert:
+        fail(
+            f"busybox: signing certificate mismatch for {url}\n"
+            f"       expected {expected_cert}\n"
+            f"       got      {actual_cert}"
+        )
+    log(f"    certificate OK ({actual_cert[:16]}...)")
+
+    out = BUILD / "busybox"
+    out.mkdir(parents=True, exist_ok=True)
+    for stale in out.glob("busybox-*"):
+        stale.unlink()
+
+    with zipfile.ZipFile(apk) as zf:
+        for abi, isa in BUSYBOX_ABIS.items():
+            member = f"lib/{abi}/libbusybox.so"
+            try:
+                blob = zf.read(member)
+            except KeyError:
+                fail(f"busybox: {member} is missing from {url}")
+            target = out / f"busybox-{isa}"
+            target.write_bytes(blob)
+            target.chmod(0o755)
+            log(f"    busybox-{isa}  {len(blob) / 1048576:.1f} MiB")
+
+    apk.unlink()
+    return version or "unknown"
+
+
 def main() -> int:
     resolve_only = "--resolve-only" in sys.argv[1:]
     env = load_env(ROOT / ".env")
@@ -317,6 +380,7 @@ def main() -> int:
         size = apk.stat().st_size
         log(f"    {apk.name}  {size / 1048576:.1f} MiB  version {version}")
 
+        libsizes.append(f"{dest}|apk|{size}")
         if extract_libs == "1":
             for abi, total in sorted(lib_sizes(apk).items()):
                 libsizes.append(f"{dest}|{abi}|{total}")
@@ -328,13 +392,16 @@ def main() -> int:
         versions.append(f"{comp}_VERSION={shlex.quote(version)}")
         versions.append(f"{comp}_RESOLVED_URL={shlex.quote(url)}")
 
+    if not resolve_only:
+        versions.append(f"BUSYBOX_VERSION={shlex.quote(fetch_busybox(env))}")
+
     (BUILD / "versions.env").write_text("\n".join(versions) + "\n")
     if resolve_only:
         log(f"\nWrote {BUILD / 'versions.env'} (nothing downloaded)")
         return 0
 
     (BUILD / "apps.list").write_text("\n".join(manifest) + "\n")
-    (BUILD / "libsizes.list").write_text("".join(f"{row}\n" for row in libsizes))
+    (BUILD / "sizes.list").write_text("".join(f"{row}\n" for row in libsizes))
     log(f"\nWrote {BUILD / 'apps.list'} ({len(manifest)} components)")
     return 0
 

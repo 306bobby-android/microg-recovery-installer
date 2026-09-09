@@ -21,8 +21,12 @@ cp -a "${ROOT}/zip/." "${STAGE}/"
 rm -f "${STAGE}/apps/.gitkeep"
 
 cp "${BUILD}/apps.list" "${STAGE}/installer/apps.list"
-cp "${BUILD}/libsizes.list" "${STAGE}/installer/libsizes.list"
+cp "${BUILD}/sizes.list" "${STAGE}/installer/sizes.list"
 cp "${BUILD}"/apps/*.apk "${STAGE}/apps/"
+
+mkdir -p "${STAGE}/busybox"
+cp "${BUILD}"/busybox/busybox-* "${STAGE}/busybox/"
+chmod 0755 "${STAGE}"/busybox/busybox-*
 
 cat > "${STAGE}/installer/module.prop" <<PROP
 id=${NAME}

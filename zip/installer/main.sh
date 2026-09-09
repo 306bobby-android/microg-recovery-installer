@@ -8,7 +8,7 @@
 
 CONFIG_DIR="${INSTALLER_DIR}/installer/config"
 APPS_LIST="${INSTALLER_DIR}/installer/apps.list"
-LIB_SIZES="${INSTALLER_DIR}/installer/libsizes.list"
+SIZES="${INSTALLER_DIR}/installer/sizes.list"
 RECEIPT_DIR='etc/microg-installer'
 RECEIPT="${RECEIPT_DIR}/files.list"
 ADDOND_NAME='50-microg.sh'
@@ -154,6 +154,7 @@ find_existing_install() {
 choose_target() {
   _ct_best_free=-1
   _ct_seen=''
+  _ct_sized=0
 
   ui_print ' '
   ui_print "  Space needed: ~${NEEDED_MIB} MiB"
@@ -174,6 +175,7 @@ choose_target() {
         ;;
     esac
     _ct_seen="${_ct_seen} ${_ct_fsid}"
+    _ct_sized=1
     ui_print "    ${_ct_name}: ${_ct_free} MiB free"
 
     [ "${_ct_free}" -ge "${NEEDED_MIB}" ] || continue
@@ -205,6 +207,11 @@ choose_target() {
       abort "The preseed file asks for partition ${_ct_forced}, which is not usable here."
   fi
 
+  if [ -z "${TARGET_ROOT}" ] && [ "${_ct_sized}" = 0 ]; then
+    IFS='|' read -r TARGET_NAME TARGET_ROOT TARGET_DEVPATH < "${WORK}/parts.list"
+    ui_print '  ! Could not measure any partition, falling back to the first usable one'
+  fi
+
   [ -n "${TARGET_ROOT}" ] ||
     abort "No partition has ~${NEEDED_MIB} MiB free. Free some space and retry."
   ui_print "  Installing to: ${TARGET_NAME} (${TARGET_ROOT})"
@@ -215,13 +222,13 @@ choose_target() {
 # select_abi <dest> -- first device ABI the apk ships libraries for, from the
 # table CI built. Only that one is installed; the others stay unpacked.
 select_abi() {
-  [ -f "${LIB_SIZES}" ] || return 1
+  [ -f "${SIZES}" ] || return 1
   _sa_ifs="${IFS}"
   IFS=','
   for _sa_abi in ${ABI_LIST}; do
     IFS="${_sa_ifs}"
     [ -n "${_sa_abi}" ] || continue
-    if grep -q "^$1|${_sa_abi}|" "${LIB_SIZES}" 2>/dev/null; then
+    if grep -q "^$1|${_sa_abi}|" "${SIZES}" 2>/dev/null; then
       printf '%s\n' "${_sa_abi}"
       return 0
     fi
@@ -231,8 +238,8 @@ select_abi() {
   return 1
 }
 
-lib_bytes() {
-  grep -m1 "^$1|$2|" "${LIB_SIZES}" 2>/dev/null | cut -d'|' -f3
+size_bytes() {
+  grep -m1 "^$1|$2|" "${SIZES}" 2>/dev/null | cut -d'|' -f3
 }
 
 # apk_abi <apk> -- same choice made by reading the apk, when libsizes is absent
@@ -498,17 +505,13 @@ while IFS='|' read -r KEY NAME TARGET DEST PACKAGE OPTIONAL LIBS VERSION; do
   [ -n "${KEY}" ] || continue
   eval "want=\${WANT_${KEY}:-0}"
   [ "${want}" = 1 ] || continue
-  size="$(unzip -l "${ZIPFILE}" "apps/${DEST}.apk" 2>/dev/null | awk '$NF ~ /\.apk$/ { print $1; exit }')"
+  size="$(size_bytes "${DEST}" apk)"
   case "${size}" in
-    ''|*[!0-9]*) size=0 ;;
+    '' | *[!0-9]*) size=0 ;;
   esac
   # the apk keeps every ABI; only the one we unpack alongside it adds to this
-  if [ "${LIBS}" = 1 ]; then
-    if abi="$(select_abi "${DEST}")"; then
-      size=$((size + $(lib_bytes "${DEST}" "${abi}")))
-    else
-      size=$((size + size * 40 / 100))
-    fi
+  if [ "${LIBS}" = 1 ] && abi="$(select_abi "${DEST}")"; then
+    size=$((size + $(size_bytes "${DEST}" "${abi}")))
   fi
   NEEDED_KB=$((NEEDED_KB + size / 1024))
 done < "${APPS_LIST}"

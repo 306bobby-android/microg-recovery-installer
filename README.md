@@ -168,6 +168,7 @@ zip/                       the flashable skeleton (no APKs)
   installer/util.sh            mounting, volume keys, permissions
   installer/config/            the XMLs and the addon.d template
   apps/                        APKs land here at build time
+  busybox/                     static busybox, one per ABI, added at build time
 CHANGELOG.md               notes for the next release
 scripts/fetch_apks.py      resolve + download + verify
 scripts/build_zip.sh       assemble the zip
@@ -185,6 +186,10 @@ scripts/next_tag.sh        version / HOTFIX tag for the next release
   optional for exactly that reason.
 - microG needs signature spoofing. If your ROM does not support it, microG will
   install and run but Google account login will not work.
+- The zip carries a static busybox for each ABI, taken from the Magisk APK and
+  pinned to its signing certificate like everything else. Recoveries built on
+  toybox have no `awk`, so relying on the recovery's own tools is not safe.
+  Mounting still uses the recovery's `mount`, which is what knows its fstab.
 - Only your device's ABI is unpacked (40 MiB for arm64, 27 MiB for arm32), not
   all four. The APK itself still carries every ABI and cannot be slimmed: it
   uses APK Signature Scheme v2 with `X-Android-APK-Signed` stripping

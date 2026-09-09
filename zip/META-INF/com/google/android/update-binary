@@ -33,6 +33,7 @@ boot_die() {
 }
 
 # Some recoveries ship a crippled shell; make sure busybox applets win if present.
+# This is only to get as far as unpacking our own busybox, below.
 if command -v busybox >/dev/null 2>&1; then
   for _bb in unzip grep mkdir rm cp mv chmod chown find sed cut tr; do
     command -v "${_bb}" >/dev/null 2>&1 || eval "${_bb}() { busybox ${_bb} \"\$@\"; }"
@@ -66,6 +67,53 @@ export TMPDIR INSTALLER_DIR
 
 rm -rf "${INSTALLER_DIR}"
 mkdir -p "${INSTALLER_DIR}" || boot_die 'Failed to create the working directory'
+
+# Use the busybox we ship rather than whatever the recovery has. Recoveries
+# built on toybox have no awk at all, and the installer needs a predictable set
+# of tools to measure partitions and read the manifests.
+setup_busybox() {
+  _sb_bin="${INSTALLER_DIR}/busybox"
+  _sb_candidates=''
+
+  case "$(uname -m 2>/dev/null || getprop ro.product.cpu.abi 2>/dev/null)" in
+    aarch64 | arm64*) _sb_candidates='arm64 arm' ;;
+    arm*) _sb_candidates='arm' ;;
+    x86_64) _sb_candidates='x86_64 x86' ;;
+    i?86 | x86) _sb_candidates='x86' ;;
+    *) _sb_candidates='arm64 arm x86_64 x86' ;;
+  esac
+
+  for _sb_arch in ${_sb_candidates}; do
+    unzip -p "${ZIPFILE}" "busybox/busybox-${_sb_arch}" > "${_sb_bin}" 2>/dev/null || continue
+    [ -s "${_sb_bin}" ] || continue
+    chmod 0755 "${_sb_bin}" 2>/dev/null || continue
+    "${_sb_bin}" true >/dev/null 2>&1 || continue
+
+    mkdir -p "${INSTALLER_DIR}/bin" || return 1
+    "${_sb_bin}" --install -s "${INSTALLER_DIR}/bin" >/dev/null 2>&1 ||
+      for _sb_applet in $("${_sb_bin}" --list 2>/dev/null); do
+        ln -sf "${_sb_bin}" "${INSTALLER_DIR}/bin/${_sb_applet}" 2>/dev/null
+      done
+
+    # Mounting already works with whatever the recovery uses, and it is the one
+    # thing that knows the device's fstab, so leave those two alone.
+    rm -f "${INSTALLER_DIR}/bin/mount" "${INSTALLER_DIR}/bin/umount"
+
+    [ -x "${INSTALLER_DIR}/bin/awk" ] || return 1
+    PATH="${INSTALLER_DIR}/bin:${PATH}"
+    export PATH
+    BUSYBOX="${_sb_bin}"
+    export BUSYBOX
+    return 0
+  done
+  return 1
+}
+
+if setup_busybox; then
+  boot_print "Using bundled busybox ($("${BUSYBOX}" 2>&1 | head -n1))"
+else
+  boot_print 'WARNING: could not start the bundled busybox, using the tools this recovery provides'
+fi
 
 unzip -o -q "${ZIPFILE}" 'installer/*' -d "${INSTALLER_DIR}" ||
   boot_die 'Failed to unpack the installer from the zip'
